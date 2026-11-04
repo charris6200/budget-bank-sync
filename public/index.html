@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Budget Bank Sync</title>
+<script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+<style>
+:root{--bg:#F1F4F2;--card:#fff;--line:#D5DDD8;--ink:#15241F;--ink2:#4A5A54;--ink3:#7D8B85;--accent:#1F6F5C;--good:#1E7A4F;--goodbg:#DDF0E5;--bad:#B23A32;--badbg:#F6DEDB}
+@media (prefers-color-scheme:dark){:root{--bg:#0F1614;--card:#17211E;--line:#2B3834;--ink:#E8EFEC;--ink2:#AFBDB7;--ink3:#7F8E88;--accent:#5CC3A4;--good:#6FD19D;--goodbg:#183A29;--bad:#F08A80;--badbg:#3E1E1B}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:32px 16px 64px}
+main{max-width:560px;margin:0 auto;display:grid;gap:16px}
+h1{font-size:26px;margin:0;letter-spacing:-.01em}
+p{margin:0}
+.sub{color:var(--ink2)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;display:grid;gap:12px}
+h2{font-size:17px;margin:0}
+label{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3)}
+input{width:100%;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:10px 12px;font:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{font:inherit;cursor:pointer;border-radius:10px;padding:10px 16px;font-weight:600;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+button.go{background:var(--accent);border-color:var(--accent);color:#fff}
+button.warn{color:var(--bad)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.bank{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--bg)}
+.bank b{display:block}.bank small{color:var(--ink3)}
+.msg{padding:10px 12px;border-radius:10px;font-size:14px}
+.msg.ok{background:var(--goodbg);color:var(--good)}
+.msg.err{background:var(--badbg);color:var(--bad)}
+code{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px 6px;font-size:13px;word-break:break-all}
+ol{margin:0;padding-left:20px;display:grid;gap:6px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Budget Bank Sync</h1>
+    <p class="sub">Link your bank once. Budget Builder and Claude read your balances and transactions through your private connector.</p>
+  </header>
+
+  <section class="card" id="lockCard">
+    <h2>Unlock</h2>
+    <p class="sub">Enter your bridge key (the BRIDGE_SECRET you set in Vercel). It stays in this tab only.</p>
+    <form id="lockForm" class="row" autocomplete="off">
+      <input id="keyIn" type="password" placeholder="Bridge key" aria-label="Bridge key" style="flex:1 1 240px">
+      <button class="go" type="submit">Unlock</button>
+    </form>
+    <div id="lockMsg"></div>
+  </section>
+
+  <section class="card" id="banksCard" hidden>
+    <div class="row" style="justify-content:space-between"><h2>Linked banks</h2><button type="button" id="lockAgain">Lock</button></div>
+    <div id="banks"></div>
+    <div class="row"><button class="go" type="button" id="linkBtn">+ Link a bank</button></div>
+    <p class="sub" style="font-size:13px">Link Chase first. Each bank login brings in all its accounts, including credit cards. Plaid's free tier allows 10 bank logins.</p>
+    <div id="msg"></div>
+  </section>
+
+  <section class="card" id="connCard" hidden>
+    <h2>Connect it to Claude</h2>
+    <ol>
+      <li>In Claude, go to <b>Customize → Connectors → Add custom connector</b>.</li>
+      <li>Name: <code>Budget Bank Sync</code> (exactly, so Budget Builder can find it).</li>
+      <li>URL: <code id="mcpUrl"></code></li>
+      <li>Authentication: <b>No sign in</b>. Under <b>Request headers</b>, add <code>Authorization</code> with the value <code>Bearer</code>, a space, then your bridge key.</li>
+    </ol>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  let key = "";
+  try { key = sessionStorage.getItem("bbs-key") || ""; } catch {}
+  $("mcpUrl").textContent = location.origin + "/mcp";
+
+  async function api(method, body) {
+    const r = await fetch("/api/link", {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(data.error || ("Request failed (" + r.status + ")")); e.status = r.status; throw e; }
+    return data;
+  }
+  function say(el, text, kind) { el.innerHTML = text ? `<div class="msg ${kind}">${esc(text)}</div>` : ""; }
+
+  async function refresh() {
+    const d = await api("GET");
+    $("lockCard").hidden = true; $("banksCard").hidden = false; $("connCard").hidden = false;
+    $("banks").innerHTML = d.banks.length
+      ? d.banks.map((b) => `<div class="bank"><span><b>${esc(b.institution)}</b><small>Linked ${new Date(b.added).toLocaleDateString()}</small></span><span class="row"><button type="button" data-re="${esc(b.item_id)}">Reconnect</button><button type="button" class="warn" data-rm="${esc(b.item_id)}" data-name="${esc(b.institution)}">Remove</button></span></div>`).join("")
+      : `<p class="sub">No banks linked yet.</p>`;
+    if (d.env === "sandbox") say($("msg"), "Sandbox mode: use Plaid's test login (user_good / pass_good). Set PLAID_ENV=production for real banks.", "ok");
+  }
+
+  async function unlock() {
+    try { await refresh(); say($("lockMsg"), ""); }
+    catch (e) {
+      $("lockCard").hidden = false; $("banksCard").hidden = true; $("connCard").hidden = true;
+      if (e.status === 401) { try { sessionStorage.removeItem("bbs-key"); } catch {} }
+      say($("lockMsg"), e.status === 401 ? (e.message === "Unauthorized" ? "That key doesn't match." : e.message) : e.message, "err");
+    }
+  }
+
+  async function openLink(item_id) {
+    say($("msg"), "");
+    $("linkBtn").disabled = true;
+    try {
+      const { link_token } = await api("POST", { action: "token", item_id });
+      const handler = Plaid.create({
+        token: link_token,
+        onSuccess: async (public_token, meta) => {
+          try {
+            if (!item_id) await api("POST", { action: "exchange", public_token, institution: meta && meta.institution });
+            say($("msg"), item_id ? "Reconnected." : `${(meta && meta.institution && meta.institution.name) || "Bank"} linked. Budget Builder will pull it in on the next sync. The first sync can take a few minutes while the bank loads your history.`, "ok");
+            await refresh();
+          } catch (e) { say($("msg"), e.message, "err"); }
+        },
+        onExit: (err) => { if (err) say($("msg"), err.display_message || err.error_message || "Linking was cancelled.", "err"); },
+      });
+      handler.open();
+    } catch (e) { say($("msg"), e.message, "err"); }
+    finally { $("linkBtn").disabled = false; }
+  }
+
+  $("lockForm").addEventListener("submit", (e) => {
+    e.preventDefault(); key = $("keyIn").value.trim(); if (!key) return;
+    try { sessionStorage.setItem("bbs-key", key); } catch {}
+    $("keyIn").value = ""; unlock();
+  });
+  $("lockAgain").addEventListener("click", () => { key = ""; try { sessionStorage.removeItem("bbs-key"); } catch {} $("lockCard").hidden = false; $("banksCard").hidden = true; $("connCard").hidden = true; });
+  $("linkBtn").addEventListener("click", () => openLink(null));
+  $("banks").addEventListener("click", async (e) => {
+    const re = e.target.closest("[data-re]"); if (re) return openLink(re.dataset.re);
+    const rm = e.target.closest("[data-rm]");
+    if (rm) {
+      if (rm.dataset.confirm !== "1") { rm.dataset.confirm = "1"; rm.textContent = `Remove ${rm.dataset.name}?`; return; }
+      try { await api("POST", { action: "remove", item_id: rm.dataset.rm }); say($("msg"), "Removed.", "ok"); await refresh(); } catch (err) { say($("msg"), err.message, "err"); }
+    }
+  });
+  if (key) unlock();
+})();
+</script>
+</body>
+</html>
